@@ -3,3 +3,80 @@ title: "Titanic: Machine Learning from Disaster"
 output: html_notebook
 ---
 
+```{r include=FALSE}
+library(tidyverse)
+```
+
+```{r}
+## Data preparation
+
+# Reading in the data
+test_init <- read_csv("data/test.csv")
+train_init <- read_csv("data/train.csv")
+test_answer <- read_csv("data/gender_submission.csv")
+
+# Joining test answer to test
+test_init <- inner_join(test_init, test_answer)
+
+# Binding training and test data
+data <- rbind(train_init, test_init)
+
+# Order columns 
+data <- data %>% select(-Survived, Survived)
+data <- as.data.frame(data)
+```
+
+Data exploration
+
+```{r}
+glimpse(data)
+```
+
+We have 1309 observations (Passengers) with 12 attributes.
+
+```{r}
+table(data$Sex)
+```
+There were 843 male and 466 female passengers on the ship.
+
+```{r}
+table(data$Pclass)
+```
+
+We have three passenger classes. Most people belong in third class.
+
+```{r}
+data %>% filter(!is.na(Age)) %>% ggplot(aes(x = Age)) +
+  geom_density() +
+  ggtitle("Age Distribution of Passengers")
+```
+
+```{r}
+data %>% filter(!is.na(Age)) %>% summarise('Mean Age' = mean(Age), 'Median Age' = median(Age))
+```
+
+The mean and median age of the passengers is around 29. The density plot indicates that people of all ages were present on the ship.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
