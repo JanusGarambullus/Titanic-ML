@@ -5,6 +5,9 @@ output: html_notebook
 
 ```{r include=FALSE}
 library(tidyverse)
+library(rpart)
+library(randomForest)
+library(caret)
 ```
 
 ```{r}
@@ -13,13 +16,8 @@ library(tidyverse)
 # Reading in the data
 test_init <- read_csv("data/test.csv")
 train_init <- read_csv("data/train.csv")
-test_answer <- read_csv("data/gender_submission.csv")
 
-# Joining test answer to test
-test_init <- inner_join(test_init, test_answer)
-
-# Binding training and test data
-data <- rbind(train_init, test_init)
+data <- train_init
 
 # Order columns 
 data <- data %>% select(-Survived, Survived)
@@ -27,6 +25,8 @@ data <- as.data.frame(data)
 ```
 
 Data exploration
+
+The gender submission data is incorrect. I will still use the test set for EDA purposes.
 
 ```{r}
 glimpse(data)
@@ -46,37 +46,134 @@ table(data$Pclass)
 We have three passenger classes. Most people belong in third class.
 
 ```{r}
-data %>% filter(!is.na(Age)) %>% ggplot(aes(x = Age)) +
-  geom_density() +
-  ggtitle("Age Distribution of Passengers")
-```
-
-```{r}
 data %>% filter(!is.na(Age)) %>% summarise('Mean Age' = mean(Age), 'Median Age' = median(Age))
 ```
 
 The mean and median age of the passengers is around 29. The density plot indicates that people of all ages were present on the ship.
 
+```{r}
+sum(is.na(data$SibSp))
+```
+
+I think the family could be rolled into a single variable. Potentially, name titles could be classified based on prestige.
+
+* Number of cabins
+* The first letter of the cabin? What does it mean?
+
+## Basic feature engineering
+
+```{r}
+data <- data %>% mutate(no_family = SibSp + Parch)
+data <- data %>% select(-c(PassengerId, SibSp, Parch, Ticket, Cabin))
+
+data$Pclass <- factor(data$Pclass)
+data$Name <- factor(data$Name)
+data$Sex <- factor(data$Sex)
+data$Embarked <- factor(data$Embarked)
+data$Survived <- factor(data$Survived)
+```
+
+The values are not imputed, there are missing values all around. In this case, I want the model to run as bad as possible, with the least amount of info. 
+After that, I will do more feature engineering based on other Kaggle answers and see how it improves my algorithm.
+
+## Machine learning prep
+
+```{r}
+set.seed(420)
+```
+
+Randomising the dataset
+
+```{r}
+data_sampled <- sample_n(data, length(data[,1]))
+```
+
+Splitting into training and test set (70/30%), removing test label
+
+```{r}
+train <- data_sampled[1:round(0.7*length(data_sampled[,1])),]
+test <- anti_join(data_sampled, train)
+
+test_answer <- test$Survived
+test <- test %>% select(-Survived)
+test$Age[is.na(test$Age)] <- median(na.omit(test$Age))
+test$Embarked[75] <- "S" 
+```
+
+```{r}
+rf_model <- randomForest(factor(Survived) ~ Pclass + Sex + Age + Embarked + no_family, data = train, na.action = na.roughfix)
+```
+
+```{r}
+rf_model
+```
 
 
+The model ran successfully.
+
+```{r}
+# Show model error
+plot(rf_model, ylim=c(0,0.36))
+legend('topright', colnames(rf_model$err.rate), col=1:3, fill=1:3)
+```
+
+```{r}
+importance <- importance(rf_model)
+
+varImportance <- data.frame(Variables = row.names(importance), 
+                            Importance = round(importance[ ,'MeanDecreaseGini'],2))
+
+rankImportance <- varImportance %>%
+  mutate(Rank = paste0('#',dense_rank(desc(Importance))))
+
+ggplot(rankImportance, aes(x = reorder(Variables, Importance), 
+    y = Importance, fill = Importance)) +
+  geom_bar(stat='identity') + 
+  geom_text(aes(x = Variables, y = 0.5, label = Rank),
+    hjust=0, vjust=0.55, size = 4, colour = 'red') +
+  labs(x = 'Variables') +
+  coord_flip() 
+```
+
+```{r}
+prediction <- predict(rf_model, test)
+
+output <- data.frame(test, test_answer, prediction)
+```
 
 
+```{r}
+accuracy <- sum(output$prediction == output$test_answer) / nrow(output) * 100
+paste0("Model accuracy: ", accuracy, "%")
+```
+
+The most basic metric we can use is model accuracy. In this case, it is 77.52%. 
+
+```{r}
+survived_percent <- sum(as.numeric(as.character(data$Survived))) / nrow(data) * 100
+100 - survived_percent
+```
+
+```{r}
+confusionMatrix(output$prediction, output$test_answer)
+```
+
+There is much improvement to be made to improve the performance of the model, but it's not a bad start.
+
+```{r}
+table(data$Sex, data$Survived)
+```
+
+```{r}
+female_live <- (81 + 109) / (233 + 468) * 100 
+100 - female_live
+```
+
+Ok, so the baseline accuracy of the assumption that all females survive and all males die is 73%. Compared to this, my model is not a huge improvement. This shows that proper data cleaning and feature engineering is essential for model building.
+
+```{r}
+paste0(round(77.53 - (100 - female_live), 2), "% improvement over baseline")
+```
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+To be continued...
