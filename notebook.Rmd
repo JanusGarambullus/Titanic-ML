@@ -8,6 +8,7 @@ library(tidyverse)
 library(rpart)
 library(randomForest)
 library(caret)
+library(h2o)
 ```
 
 ```{r}
@@ -155,25 +156,384 @@ survived_percent <- sum(as.numeric(as.character(data$Survived))) / nrow(data) * 
 ```
 
 ```{r}
-confusionMatrix(output$prediction, output$test_answer)
+confusionMatrix(output$prediction, output$test_answer, positive = "1")
 ```
+
+Ok, so don't forget to set the positive class in the confusion matrix command. Alright, so the next step now is to go back to data cleaning and feature engineering and see how the accuracy and Kappa can be improved.
 
 There is much improvement to be made to improve the performance of the model, but it's not a bad start.
 
+I want to see the progress of the model, so I will return to feature engineering below.
+
+## Feature engineering round 2
+
 ```{r}
-table(data$Sex, data$Survived)
+summary(data)
+```
+
+* Alrighty. We have missing values in Age and Embarked.
+* We can split out the titles and group them together. This is most likely going to be a combination of age and sex. But, knowing the title but not age is going to give us an edge in imputing the large number of missing age values. Everything for predictive accuracy.
+
+### Creating title feature
+
+```{r}
+data$Name <- as.character(data$Name)
+data$title <- sub("^.*, ", "", data$Name)
+data$title <- sub("\\..*", "", data$title)
 ```
 
 ```{r}
-female_live <- (81 + 109) / (233 + 468) * 100 
-100 - female_live
+table(data$title)
 ```
 
-Ok, so the baseline accuracy of the assumption that all females survive and all males die is 73%. Compared to this, my model is not a huge improvement. This shows that proper data cleaning and feature engineering is essential for model building.
+Looking good. There are some weird values:
+* Mlle = Madmoiselle (French)
+* Mme = Madame (French)
+* Ms = Miss
+* Rev = reverend?
+* Jonkheer - low ranking noble
+* Master - young male (child)
+
+I would create a category for important people with rare names. It is sort of a saying that the captain should leave a sinking ship last.
 
 ```{r}
-paste0(round(77.53 - (100 - female_live), 2), "% improvement over baseline")
+data$title <- gsub("Mlle", "Miss", data$title)
+data$title <- gsub("Mme", "Mrs", data$title)
+data$title <- gsub("Ms", "Miss", data$title)
+
+# Aggregating important people
+data$title <- gsub("Capt|Col|Don|Dr|Jonkheer|Lady|Major|Rev|Sir|the Countess", "High_rank", data$title)
+```
+
+The title feature is now ready.
+
+### Imputing Embarked missing value
+
+```{r}
+data %>% ggplot(aes(x = Embarked, y = Age)) +
+  geom_boxplot() +
+  ggtitle("Title")
+```
+
+```{r}
+table(data$Embarked, data$Sex)
+```
+
+Good question: How to impute the missing values of the embarked. Based on their age and sex, I would wager that they embarked from C. In another kernel, this was calculated based on the ticket price.
+
+```{r}
+data[is.na(data$Embarked), "Embarked"] <- "C"
+```
+
+### Imputing missing age
+
+Based on Kaggle's kernel, it would make sense to impute the missing age values based on a linear model incorporating the variables I'm working with.
+
+```{r}
+age_lm <- lm(Age ~ Sex + Fare + Embarked + no_family + title, data = data)
+```
+
+```{r}
+anova(age_lm)
+```
+
+It appears that the Embarkment is not a significant predictor of age.
+
+```{r}
+age_lm <- lm(Age ~ Sex + Fare + no_family + title, data = na.omit(data))
+```
+
+```{r}
+anova(age_lm)
+```
+
+```{r}
+summary(age_lm)
+```
+
+```{r}
+data_test <- data
+data[is.na(data$Age), "Age"] <- predict(age_lm, data[is.na(data$Age),])
+
+# If age is negative, turn into 0
+data$Age <- ifelse(data$Age < 0, 0, data$Age)
+
+# Round age to half number
+data$Age <- round(data$Age, 1)
+```
+
+The data is clean and ready to go.
+
+## Random Forest Round 2
+
+```{r}
+set.seed(420)
+```
+
+Randomising the dataset
+
+```{r}
+data_sampled <- sample_n(data, length(data[,1]))
+```
+
+Splitting into training and test set (70/30%), removing test label
+
+```{r}
+train <- data_sampled[1:round(0.7*length(data_sampled[,1])),]
+test <- anti_join(data_sampled, train)
+
+test_answer <- test$Survived
+test <- test %>% select(-Survived)
+```
+
+```{r}
+rf_model <- randomForest(factor(Survived) ~ Pclass + Sex + Age + Fare + Embarked + no_family, data = train)
+```
+
+```{r}
+rf_model
 ```
 
 
-To be continued...
+The model ran successfully.
+
+```{r}
+# Show model error
+plot(rf_model, ylim=c(0,0.36))
+legend('topright', colnames(rf_model$err.rate), col=1:3, fill=1:3)
+```
+
+```{r}
+importance <- importance(rf_model)
+
+varImportance <- data.frame(Variables = row.names(importance), 
+                            Importance = round(importance[ ,'MeanDecreaseGini'],2))
+
+rankImportance <- varImportance %>%
+  mutate(Rank = paste0('#',dense_rank(desc(Importance))))
+
+ggplot(rankImportance, aes(x = reorder(Variables, Importance), 
+    y = Importance, fill = Importance)) +
+  geom_bar(stat='identity') + 
+  geom_text(aes(x = Variables, y = 0.5, label = Rank),
+    hjust=0, vjust=0.55, size = 4, colour = 'red') +
+  labs(x = 'Variables') +
+  coord_flip() 
+```
+
+```{r}
+prediction <- predict(rf_model, test)
+
+output <- data.frame(test, test_answer, prediction)
+```
+
+
+```{r}
+accuracy <- sum(output$prediction == output$test_answer) / nrow(output) * 100
+paste0("Model accuracy: ", accuracy, "%")
+```
+
+I improved 1.5% on the overall model accuracy.
+
+```{r}
+survived_percent <- sum(as.numeric(as.character(data$Survived))) / nrow(data) * 100
+100 - survived_percent
+```
+
+```{r}
+confusionMatrix(output$prediction, output$test_answer, positive = "1")
+```
+
+The model accuracy improved a little bit. It's definitely a step in the right direction. How else could I improve model performance? Trying a different technique.
+
+```{r}
+set.seed(420)
+data_sampled <- sample_n(data, length(data[,1]))
+```
+
+Splitting into training and test set (70/30%), removing test label
+
+```{r}
+train <- data_sampled[1:round(0.7*length(data_sampled[,1])),]
+test <- anti_join(data_sampled, train)
+
+test_answer <- test$Survived
+train <- train %>% select(-Name)
+test <- test %>% select(-Name)
+```
+
+```{r}
+h2o.init()
+```
+
+```{r}
+y <- "Survived"
+x <- setdiff(names(train), y)
+```
+
+```{r}
+train[,y] <- as.factor(train[,y])
+test[,y] <- as.factor(test[,y])
+
+train <- as.h2o(train)
+test <- as.h2o(test)
+```
+
+```{r}
+aml <- h2o.automl(x = x, y = y,
+                  training_frame = train,
+                  max_models = 10,
+                  seed = 1)
+
+lb <- aml@leaderboard
+print(lb, n = nrow(lb))
+aml@leader
+```
+
+```{r}
+pred <- h2o.predict(aml, test)
+```
+
+```{r}
+test_out <- as.data.frame(test)
+pred_out <- as.data.frame(pred)
+test_out$predict <- pred_out$predict
+```
+
+```{r}
+confusionMatrix(test_out$predict, test_out$Survived, positive = "1")
+```
+
+```{r}
+h2o.shutdown()
+```
+
+I managed to squeeze out just a little bit of extra predictive power compared to the basic Random Forest Model.
+
+Kappa of 0.58
+
+The next step would be to predict the test set survival rates and submit my file to Kaggle. Let's do it.
+
+## Final training of the model and predicting final output
+
+### Feature engineering with full dataset (Please don't forget to do this next time)
+
+```{r}
+data <- 
+
+data <- data %>% mutate(no_family = SibSp + Parch)
+data <- data %>% select(-c(PassengerId, SibSp, Parch, Ticket, Cabin))
+
+data$Pclass <- factor(data$Pclass)
+data$Name <- factor(data$Name)
+data$Sex <- factor(data$Sex)
+data$Embarked <- factor(data$Embarked)
+data$Survived <- factor(data$Survived)
+```
+
+```{r}
+data$Name <- as.character(data$Name)
+data$title <- sub("^.*, ", "", data$Name)
+data$title <- sub("\\..*", "", data$title)
+```
+
+```{r}
+data$title <- gsub("Mlle", "Miss", data$title)
+data$title <- gsub("Mme", "Mrs", data$title)
+data$title <- gsub("Ms", "Miss", data$title)
+
+# Aggregating important people
+data$title <- gsub("Capt|Col|Don|Dr|Jonkheer|Lady|Major|Rev|Sir|the Countess", "High_rank", data$title)
+```
+
+```{r}
+data %>% ggplot(aes(x = Embarked, y = Age)) +
+  geom_boxplot() +
+  ggtitle("Title")
+```
+
+```{r}
+data[is.na(data$Embarked), "Embarked"] <- "C"
+```
+
+```{r}
+age_lm <- lm(Age ~ Sex + Fare + Embarked + no_family + title, data = data)
+```
+
+```{r}
+age_lm <- lm(Age ~ Sex + Fare + no_family + title, data = na.omit(data))
+```
+
+```{r}
+data_test <- data
+data[is.na(data$Age), "Age"] <- predict(age_lm, data[is.na(data$Age),])
+
+# If age is negative, turn into 0
+data$Age <- ifelse(data$Age < 0, 0, data$Age)
+
+# Round age to half number
+data$Age <- round(data$Age, 1)
+```
+
+## What am I doing?
+
+```{r}
+set.seed(420)
+
+# Reading in the data
+test_init <- read_csv("data/test.csv")
+train_init <- read_csv("data/train.csv")
+
+data <- train_init
+
+# Order columns 
+data <- data %>% select(-Survived, Survived)
+data <- as.data.frame(data)
+```
+
+```{r}
+train <- data
+test <- anti_join(data_sampled, train)
+
+test_answer <- test$Survived
+train <- train %>% select(-Name)
+test <- test %>% select(-Name)
+```
+
+```{r}
+h2o.init()
+```
+
+```{r}
+y <- "Survived"
+x <- setdiff(names(train), y)
+```
+
+```{r}
+train[,y] <- as.factor(train[,y])
+test[,y] <- as.factor(test[,y])
+
+train <- as.h2o(train)
+test <- as.h2o(test)
+```
+
+```{r}
+aml <- h2o.automl(x = x, y = y,
+                  training_frame = train,
+                  max_models = 10,
+                  seed = 1)
+
+lb <- aml@leaderboard
+print(lb, n = nrow(lb))
+aml@leader
+```
+
+```{r}
+pred <- h2o.predict(aml, test)
+```
+
+```{r}
+test_out <- as.data.frame(test)
+pred_out <- as.data.frame(pred)
+test_out$predict <- pred_out$predict
+```
